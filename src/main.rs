@@ -17,7 +17,7 @@ use std::net::TcpListener;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-const CURRENT_VERSION: &str = "2.2.0";
+const CURRENT_VERSION: &str = "1.1.0";
 
 fn load_saved_name(my_id: &str) -> String {
     std::fs::read_to_string(paths::file(state::NAME_FILE))
