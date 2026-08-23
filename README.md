@@ -1,10 +1,14 @@
+# feral
+
 An anonymous peer-to-peer chat for your LAN. No server, accounts, or
 address book. Peers find each other over UDP and chat over encrypted
 TCP connections.
 
+```
 git clone https://github.com/sixteenjune/feral
 cd feral
 cargo build --release
+```
 
 Run `feral` and use `/help` for the full command list. Basic commands:
 
@@ -29,5 +33,3 @@ For Linux:
     cargo build --release --target x86_64-unknown-linux-gnu
 
 Supported platforms are Linux and Windows. macOS is not supported.
-
-Contributions welcome — open a PR with changes.
