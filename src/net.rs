@@ -27,7 +27,7 @@ fn timestamp() -> String {
 
 pub fn log_message(state: &AppState, line: &str) {
     let _g = state.log_lock.lock().unwrap();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(crate::state::LOG_FILE) {
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(crate::paths::file(crate::state::LOG_FILE)) {
         let _ = writeln!(f, "{}", line);
     }
 }
@@ -201,6 +201,18 @@ fn mentions_me(state: &Arc<AppState>, text: &str) -> bool {
     text.to_lowercase().contains(&format!("@{}", my_name))
 }
 
+/// Peers could in principle claim an arbitrarily long name or message;
+/// truncate defensively on receipt so a hostile peer can't force us to
+/// store/print/log unbounded text sizes (see also the client-side caps
+/// enforced in commands.rs for our own outgoing name/messages).
+fn clamp_received_name(raw: String) -> String {
+    raw.chars().take(crate::state::MAX_NAME_LEN).collect()
+}
+
+fn clamp_received_text(raw: String) -> String {
+    raw.chars().take(crate::state::MAX_MESSAGE_LEN).collect()
+}
+
 /// Parses and dispatches one already-decrypted protocol line: unwraps a
 /// RELAY envelope (dedup, freshness check, forward), then verifies and
 /// acts on the inner packet if it's addressed to us or a broadcast.
@@ -269,8 +281,8 @@ pub fn handle_incoming(state: &Arc<AppState>, raw_in: &str, ip: &str) {
                 let rp: Vec<&str> = rest.splitn(3, '|').collect();
                 if rp.len() == 3 { (rp[0], rp[1], rp[2]) } else { (rest, "", "") }
             };
-            let name = sanitize_for_display(&unescape_field(name_raw));
-            let text = sanitize_for_display(&unescape_field(text_raw));
+            let name = clamp_received_name(sanitize_for_display(&unescape_field(name_raw)));
+            let text = clamp_received_text(sanitize_for_display(&unescape_field(text_raw)));
             let msg_id = unescape_field(msg_id_raw);
             let reply_id = unescape_field(reply_id_raw);
             if let Ok(idx) = color_idx.parse::<usize>() {
@@ -303,7 +315,13 @@ pub fn handle_incoming(state: &Arc<AppState>, raw_in: &str, ip: &str) {
             let shown_name = state.display_identity(peer_id, &name);
             let display = format!("{} {}{} {}{}{}: {}", timestamp(), id_tag, reply_tag, c, shown_name, colors::reset(), text);
             if pinged {
-                ui::notify(&format!("\x07{}{}{}", colors::reverse(), display, colors::unreverse()));
+                // Reverse-video + bell are a nice touch when the
+                // terminal supports them, but neither is guaranteed
+                // (NO_COLOR, a piped/non-tty session, or a muted
+                // terminal bell all silently no-op them) -- so the
+                // ">>> ... <<<" text marker is what actually
+                // guarantees a mention is visible, unconditionally.
+                ui::notify(&format!(">>> {}{}{} <<<", colors::reverse(), display, colors::unreverse()));
             } else {
                 ui::notify(&display);
             }
@@ -323,8 +341,8 @@ pub fn handle_incoming(state: &Arc<AppState>, raw_in: &str, ip: &str) {
                 return;
             }
             let Some((name_raw, text_raw)) = rest.split_once('|') else { return };
-            let name = sanitize_for_display(&unescape_field(name_raw));
-            let text = sanitize_for_display(&unescape_field(text_raw));
+            let name = clamp_received_name(sanitize_for_display(&unescape_field(name_raw)));
+            let text = clamp_received_text(sanitize_for_display(&unescape_field(text_raw)));
             if let Ok(idx) = color_idx.parse::<usize>() {
                 state.set_color_for_id(sender_id, idx);
             }
@@ -358,7 +376,7 @@ pub fn handle_incoming(state: &Arc<AppState>, raw_in: &str, ip: &str) {
             if !verify_sender(state, peer_id, ip, is_direct, ts, &signed_line, &sig_hex) {
                 return;
             }
-            let name = sanitize_for_display(&unescape_field(parts[2]));
+            let name = clamp_received_name(sanitize_for_display(&unescape_field(parts[2])));
             let (is_new, duplicate) = {
                 let mut names = state.peer_names.lock().unwrap();
                 let is_new = !names.contains_key(peer_id);
@@ -674,14 +692,15 @@ pub fn accept_connections(state: Arc<AppState>, listener: TcpListener) {
                 continue;
             }
         }
-        if !state.reserve_handshake_slot() {
-            continue; // too many connections mid-handshake; shed load
+        if !state.reserve_handshake_slot(&ip) {
+            continue; // too many connections mid-handshake (globally or from this IP); shed load
         }
 
         let state2 = Arc::clone(&state);
         std::thread::spawn(move || {
+            let ip2 = ip.clone();
             establish_link(Arc::clone(&state2), stream, ip);
-            state2.release_handshake_slot();
+            state2.release_handshake_slot(&ip2);
         });
     }
 }
@@ -717,11 +736,11 @@ pub fn connect_to_peer(state: &Arc<AppState>, ip: &str, remote_id: Option<&str>)
     };
     let _ = stream.set_nodelay(true);
 
-    if !state.reserve_handshake_slot() {
+    if !state.reserve_handshake_slot(ip) {
         return;
     }
     establish_link(Arc::clone(state), stream, ip.to_string());
-    state.release_handshake_slot();
+    state.release_handshake_slot(ip);
 }
 
 /// Enumerates local network interfaces to find LAN-facing IPv4
@@ -816,7 +835,7 @@ pub fn discovery(state: Arc<AppState>) {
                 }
                 let peer_id = msg[5..].to_string();
                 let ip = addr.ip().to_string();
-                if peer_id == state.my_id || peer_id.len() != 8 {
+                if peer_id == state.my_id || peer_id.len() != 8 || !peer_id.bytes().all(|b| b.is_ascii_hexdigit()) {
                     continue;
                 }
 

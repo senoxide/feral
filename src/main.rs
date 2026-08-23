@@ -3,6 +3,7 @@ mod commands;
 mod crypto;
 mod identity;
 mod net;
+mod paths;
 mod protocol;
 mod state;
 mod ui;
@@ -11,15 +12,15 @@ mod ui;
 compile_error!("feral supports Linux and Windows only; macOS is not supported.");
 
 use state::AppState;
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::net::TcpListener;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-const CURRENT_VERSION: &str = "2.1.0";
+const CURRENT_VERSION: &str = "2.2.0";
 
 fn load_saved_name(my_id: &str) -> String {
-    std::fs::read_to_string(state::NAME_FILE)
+    std::fs::read_to_string(paths::file(state::NAME_FILE))
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -28,7 +29,7 @@ fn load_saved_name(my_id: &str) -> String {
 
 fn load_saved_colors() -> std::collections::HashMap<String, usize> {
     let mut result = std::collections::HashMap::new();
-    if let Ok(content) = std::fs::read_to_string(state::COLOR_FILE) {
+    if let Ok(content) = std::fs::read_to_string(paths::file(state::COLOR_FILE)) {
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || !line.contains('=') {
@@ -45,7 +46,7 @@ fn load_saved_colors() -> std::collections::HashMap<String, usize> {
 }
 
 fn show_recent_history() {
-    let Ok(content) = std::fs::read_to_string(state::LOG_FILE) else { return };
+    let Ok(content) = std::fs::read_to_string(paths::file(state::LOG_FILE)) else { return };
     let lines: Vec<&str> = content.lines().collect();
     if lines.is_empty() {
         return;
@@ -68,6 +69,7 @@ fn print_banner(state: &AppState) {
     ui::println_out("");
     ui::println_out(&format!("Welcome to feral version {}!", CURRENT_VERSION));
     ui::println_out(&format!("Your id: {}", state.my_id));
+    ui::println_out(&format!("Data directory: {}", paths::data_dir().display()));
     ui::println_out("Every connection is end-to-end encrypted with a fresh session key -- see README for the threat model.");
     ui::println_out("Quick start: /who (list peers)  /name <n>  /msg <n> <text>  /sendfile <n> <path>  /help (full list)");
     ui::println_out("Looking for other users...");
@@ -122,6 +124,8 @@ fn main() {
         }
     };
 
+    let interactive = ui::start_interactive_session();
+
     print_banner(&state);
     show_recent_history();
 
@@ -134,8 +138,13 @@ fn main() {
     }
 
     {
+        // Backstop for non-interactive termination (SIGINT from `kill`,
+        // a controlling process, etc). Interactive Ctrl+C is handled by
+        // the raw-mode line editor itself, since raw mode suppresses
+        // the terminal's normal signal generation.
         let state = Arc::clone(&state);
         ctrlc::set_handler(move || {
+            ui::end_interactive_session();
             state.running.store(false, Ordering::Relaxed);
             println!("\nGoodbye!");
             std::process::exit(0);
@@ -158,19 +167,17 @@ fn main() {
         std::thread::spawn(move || net::reaper(state2));
     }
 
-    let stdin = std::io::stdin();
     loop {
-        ui::print_out("> ");
-        let mut line = String::new();
-        match stdin.lock().read_line(&mut line) {
-            Ok(0) => break, // EOF
-            Ok(_) => {
-                let line = line.trim_end_matches(['\r', '\n']).to_string();
+        if !interactive {
+            ui::print_out("> ");
+        }
+        match ui::read_line(interactive) {
+            ui::InputResult::Line(line) => {
                 if !commands::process_command(&state, &line) {
                     break;
                 }
             }
-            Err(_) => break,
+            ui::InputResult::Quit => break,
         }
     }
 
@@ -178,6 +185,7 @@ fn main() {
 }
 
 fn shutdown(state: &Arc<AppState>) {
+    ui::end_interactive_session();
     state.running.store(false, Ordering::Relaxed);
     if let Some(sock) = state.discovery_socket.write().unwrap().take() {
         drop(sock);

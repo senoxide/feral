@@ -20,6 +20,8 @@ hex = "0.4"
 if-addrs = "0.13"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "multipart", "rustls-tls"] }
 ctrlc = "3"
+dirs = "5"
+crossterm = "0.27"
 
 [profile.release]
 opt-level = 2

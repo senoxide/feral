@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-pub const NAME_FILE: &str = ".feral_name";
-pub const COLOR_FILE: &str = ".feral_colors";
+pub const NAME_FILE: &str = "name";
+pub const COLOR_FILE: &str = "colors";
 pub const LOG_FILE: &str = "feral.log";
 pub const HISTORY_LINES_TO_SHOW: usize = 20;
 
@@ -26,10 +26,13 @@ pub const RECONNECT_DELAY_MAX: f64 = 9.0;
 pub const MAX_SENDFILE_BYTES: u64 = 200 * 1024 * 1024;
 pub const ISOLATION_WARNING_AFTER: Duration = Duration::from_secs(45);
 pub const MAX_PENDING_HANDSHAKES: usize = crate::protocol::MAX_PEER_DEGREE * 3;
+pub const MAX_PENDING_HANDSHAKES_PER_IP: usize = 2;
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
 /// Wire frames above this size are refused before any bytes are read
 /// for them, so a forged length prefix can't force a large allocation.
 pub const MAX_FRAME_BYTES: u32 = 20_000;
+pub const MAX_NAME_LEN: usize = 32;
+pub const MAX_MESSAGE_LEN: usize = 2_000;
 
 /// Bounded, insertion-ordered id set with age-based eviction. Used for
 /// gossip dedup (seen_msg_ids).
@@ -175,6 +178,7 @@ pub struct AppState {
     pub start_time: Instant,
     pub isolation_warned: AtomicBool,
     pub pending_handshakes: std::sync::atomic::AtomicUsize,
+    pub pending_handshakes_by_ip: Mutex<HashMap<String, usize>>,
 
     pub discovery_socket: RwLock<Option<std::net::UdpSocket>>,
     pub server_socket: RwLock<Option<std::net::TcpListener>>,
@@ -211,6 +215,7 @@ impl AppState {
             start_time: Instant::now(),
             isolation_warned: AtomicBool::new(false),
             pending_handshakes: std::sync::atomic::AtomicUsize::new(0),
+            pending_handshakes_by_ip: Mutex::new(HashMap::new()),
             discovery_socket: RwLock::new(None),
             server_socket: RwLock::new(None),
         }
@@ -230,24 +235,39 @@ impl AppState {
         self.seen_msg_ids.lock().unwrap().reap_old(SEEN_ID_MAX_AGE);
     }
 
-    /// Bounds concurrent in-progress handshakes so a flood of TCP
-    /// connections that never complete a handshake can't pin down an
-    /// unbounded number of threads.
-    pub fn reserve_handshake_slot(&self) -> bool {
+    /// Bounds concurrent in-progress handshakes, both globally (so a
+    /// flood of connections that never complete a handshake can't pin
+    /// down an unbounded number of threads) and per source IP (so a
+    /// single misbehaving address can't consume the entire global
+    /// budget and deny legitimate peers a chance to connect).
+    pub fn reserve_handshake_slot(&self, ip: &str) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
+        let mut by_ip = self.pending_handshakes_by_ip.lock().unwrap();
+        let count = by_ip.entry(ip.to_string()).or_insert(0);
+        if *count >= MAX_PENDING_HANDSHAKES_PER_IP {
+            return false;
+        }
         loop {
             let cur = self.pending_handshakes.load(Relaxed);
             if cur >= MAX_PENDING_HANDSHAKES {
                 return false;
             }
             if self.pending_handshakes.compare_exchange(cur, cur + 1, Relaxed, Relaxed).is_ok() {
+                *count += 1;
                 return true;
             }
         }
     }
 
-    pub fn release_handshake_slot(&self) {
+    pub fn release_handshake_slot(&self, ip: &str) {
         self.pending_handshakes.fetch_sub(1, Ordering::Relaxed);
+        let mut by_ip = self.pending_handshakes_by_ip.lock().unwrap();
+        if let Some(count) = by_ip.get_mut(ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                by_ip.remove(ip);
+            }
+        }
     }
 
     /// Token-bucket check; true means the line should be dropped. Also

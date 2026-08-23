@@ -3,15 +3,17 @@
 // TOFU-pinned table of peer keys that makes that useful. No address
 // book is kept here -- peer discovery is dynamic (UDP broadcast) since
 // IPs on a DHCP LAN aren't stable enough to be worth caching; see
-// net::discovery.
+// net::discovery. Files live under paths::data_dir() (~/feral on
+// Linux, %APPDATA%\feral on Windows).
+use crate::paths;
 use ed25519_dalek::SigningKey;
 use std::collections::HashMap;
 use std::io::Write;
 
-pub const IDENTITY_FILE: &str = ".feral_identity";
-pub const KNOWN_PEERS_FILE: &str = ".feral_known_peers";
+pub const IDENTITY_FILE: &str = "identity";
+pub const KNOWN_PEERS_FILE: &str = "known_peers";
 
-fn restrict_permissions(path: &str) {
+fn restrict_permissions(path: &std::path::Path) {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -25,17 +27,18 @@ fn restrict_permissions(path: &str) {
 /// on first run. The seed is the only secret ever written to disk or
 /// held in memory; it never goes over the network.
 pub fn load_or_create() -> SigningKey {
-    if let Ok(hex_seed) = std::fs::read_to_string(IDENTITY_FILE) {
+    let path = paths::file(IDENTITY_FILE);
+    if let Ok(hex_seed) = std::fs::read_to_string(&path) {
         if let Ok(bytes) = hex::decode(hex_seed.trim()) {
             if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
                 return SigningKey::from_bytes(&arr);
             }
         }
-        eprintln!("Warning: {} is corrupt; generating a new identity.", IDENTITY_FILE);
+        eprintln!("Warning: {} is corrupt; generating a new identity.", path.display());
     }
     let key = SigningKey::generate(&mut rand::rngs::OsRng);
-    if std::fs::write(IDENTITY_FILE, hex::encode(key.to_bytes())).is_ok() {
-        restrict_permissions(IDENTITY_FILE);
+    if std::fs::write(&path, hex::encode(key.to_bytes())).is_ok() {
+        restrict_permissions(&path);
     }
     key
 }
@@ -46,7 +49,7 @@ pub fn load_or_create() -> SigningKey {
 /// *different* key is flagged rather than silently trusted.
 pub fn load_known_peers() -> HashMap<String, (String, String)> {
     let mut out = HashMap::new();
-    if let Ok(content) = std::fs::read_to_string(KNOWN_PEERS_FILE) {
+    if let Ok(content) = std::fs::read_to_string(paths::file(KNOWN_PEERS_FILE)) {
         for line in content.lines() {
             let parts: Vec<&str> = line.trim().splitn(3, '=').collect();
             if parts.len() == 3 {
@@ -58,7 +61,7 @@ pub fn load_known_peers() -> HashMap<String, (String, String)> {
 }
 
 pub fn append_known_peer(short_id: &str, fp: &str, pubkey_hex: &str) {
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(KNOWN_PEERS_FILE) {
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(paths::file(KNOWN_PEERS_FILE)) {
         let _ = writeln!(f, "{}={}={}", short_id, fp, pubkey_hex);
     }
 }

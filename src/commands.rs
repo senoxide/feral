@@ -1,5 +1,6 @@
 use crate::colors;
 use crate::net;
+use crate::paths;
 use crate::protocol::escape_field;
 use crate::state::AppState;
 use crate::ui;
@@ -182,7 +183,7 @@ fn print_colors(state: &Arc<AppState>) {
 }
 
 fn save_name(name: &str) {
-    let _ = std::fs::write(crate::state::NAME_FILE, name);
+    let _ = std::fs::write(paths::file(crate::state::NAME_FILE), name);
 }
 
 fn remember_color_for_name(state: &Arc<AppState>, name: &str, idx: usize) {
@@ -196,20 +197,20 @@ fn save_colors(state: &Arc<AppState>) {
     for (name, idx) in items {
         out.push_str(&format!("{}={}\n", name, idx));
     }
-    let _ = std::fs::write(crate::state::COLOR_FILE, out);
+    let _ = std::fs::write(paths::file(crate::state::COLOR_FILE), out);
 }
 
 /// Uploads a file to catbox.moe and returns the resulting URL, used in
 /// place of dechat's chunked file-transfer protocol (see README).
 /// Streams from disk via Part::file rather than reading the whole file
 /// into memory.
-fn upload_to_catbox(filepath: &str) -> Result<String, String> {
-    let path = std::path::Path::new(filepath);
-    let part = reqwest::blocking::multipart::Part::file(path).map_err(|e| format!("Could not read file: {}", e))?;
+fn upload_to_catbox(filepath: &std::path::Path) -> Result<String, String> {
+    let part = reqwest::blocking::multipart::Part::file(filepath).map_err(|e| format!("Could not read file: {}", e))?;
     let form = reqwest::blocking::multipart::Form::new().text("reqtype", "fileupload").part("fileToUpload", part);
 
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
+        .user_agent(concat!("feral/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -232,29 +233,36 @@ fn upload_to_catbox(filepath: &str) -> Result<String, String> {
 
 fn send_file(state: &Arc<AppState>, target: &str, filepath: &str) {
     let Some(_peer_id) = state.resolve_peer_id(target) else { return };
-    let filesize = match std::fs::metadata(filepath) {
+    let resolved = paths::expand_tilde(filepath);
+    let filesize = match std::fs::metadata(&resolved) {
+        Ok(m) if m.is_dir() => {
+            ui::println_out(&format!("'{}' is a directory, not a file.", resolved.display()));
+            return;
+        }
         Ok(m) => m.len(),
         Err(e) => {
-            ui::println_out(&format!("Could not read file: {}", e));
+            ui::println_out(&format!("Could not read '{}': {}", resolved.display(), e));
+            if filepath != resolved.to_string_lossy() {
+                ui::println_out(&format!("(expanded from '{}')", filepath));
+            }
             return;
         }
     };
     if filesize > crate::state::MAX_SENDFILE_BYTES {
         ui::println_out(&format!(
             "'{}' is {}, which is over the {} limit.",
-            filepath,
+            resolved.display(),
             human_size(filesize),
             human_size(crate::state::MAX_SENDFILE_BYTES)
         ));
         return;
     }
-    ui::println_out(&format!("Uploading '{}' ({}) to catbox.moe...", filepath, human_size(filesize)));
+    ui::println_out(&format!("Uploading '{}' ({}) to catbox.moe...", resolved.display(), human_size(filesize)));
     let state2 = Arc::clone(state);
     let target = target.to_string();
-    let filepath = filepath.to_string();
-    std::thread::spawn(move || match upload_to_catbox(&filepath) {
+    std::thread::spawn(move || match upload_to_catbox(&resolved) {
         Ok(url) => {
-            let filename = std::path::Path::new(&filepath).file_name().and_then(|f| f.to_str()).unwrap_or("file").to_string();
+            let filename = resolved.file_name().and_then(|f| f.to_str()).unwrap_or("file").to_string();
             ui::notify(&format!("Uploaded '{}'. Sending link to {}...", filename, target));
             send_private_message(&state2, &target, &format!("sent you a file: {} ({})", filename, url));
         }
