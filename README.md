@@ -1,35 +1,28 @@
 # feral
 
-An anonymous peer-to-peer chat for your LAN. No server, accounts, or
-address book. Peers find each other over UDP and chat over encrypted
-TCP connections.
+peer-to-peer lan chat with no server, no accounts, and no signup. peers find
+each other over udp and talk over encrypted tcp.
+
+## build
 
 ```
 git clone https://github.com/sixteenjune/feral
 cd feral
-cargo build --release
+cargo build --release --target x86_64-unknown-linux-gnu
 ```
 
-Run `feral` and use `/help` for the full command list. Basic commands:
+the default target is windows (gnu/mingw) so install the `x86_64-pc-windows-gnu` target and minGW, then just `cargo build --release`.
 
-* `/who` — list peers
-* `/name <name>` — set your display name
-* `/msg <name|id> <text>` — send a private message
-* `/sendfile <name|id> <path>` — upload and send a file link
-* `/fingerprint [name|id]` — show an identity fingerprint
+supported: linux, windows. macos: not supported.
 
-Fingerprints are SHA-256 hashes of the permanent identity key. You
-normally do not need to check them. For trusted first contact, compare
-the fingerprint with the person over a voice call or in person; names
-and short IDs are not proof of identity.
+## usage
 
-The default build target is Windows GNU/MinGW. Install the
-`x86_64-pc-windows-gnu` Rust target and MinGW, then run:
+run `feral`, then `/help` for the full command list. the basics:
 
-    cargo build --release
+- `/who` — list peers on the network
+- `/name <name>` — set your display name
+- `/msg <name|id> <text>` — private message
+- `/sendfile <name|id> <path>` — send a file
+- `/fingerprint [name|id]` — show an identity fingerprint
 
-For Linux:
-
-    cargo build --release --target x86_64-unknown-linux-gnu
-
-Supported platforms are Linux and Windows. macOS is not supported.
+fingerprints are sha-256 hashes of each peer's permanent identity key. you don't need to check them day to day, but if you want to be sure who you're talking to, compare fingerprints over a call or in person.
